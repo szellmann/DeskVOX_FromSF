@@ -91,6 +91,7 @@ if (NOT DEFINED DESKVOX_USE_CUDA)
   option(DESKVOX_USE_CUDA "Use CUDA if available" ON)
 endif()
 
+option(DESKVOX_USE_SSE "Use SSE intrinsic code if possible" ON)
 
 # All options referred to from DeskvoxHandleOptions have to be specified BEFORE this include,
 # otherwise options will not be correctly set on first cmake run
