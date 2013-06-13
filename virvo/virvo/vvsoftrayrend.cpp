@@ -38,6 +38,11 @@
 #include <cstring>
 #include <queue>
 
+#ifdef _MSC_VER
+#include <boost/math/special_functions/round.hpp>
+using namespace boost::math;
+#endif
+
 typedef std::vector<float, virvo::mem::aligned_allocator<float, CACHE_LINE> > vecf;
 
 #if VV_USE_SSE
@@ -691,5 +696,10 @@ void vvSoftRayRend::render(vvSoftRayRend::Thread* thread)
     thread->renderer->renderTile(tile, thread);
   }
   pthread_barrier_wait(thread->barrier);
+}
+
+vvRenderer* createSoftRayRend(vvVolDesc* vd, vvRenderState const& rs)
+{
+  return new vvSoftRayRend(vd, rs);
 }
 

@@ -600,5 +600,9 @@ bool vvRayRend::allocIbrArrays(size_t w, size_t h)
   return true;
 }
 
+vvRenderer* createSoftRayRend(vvVolDesc* vd, vvRenderState const& rs)
+{
+  return new vvRayRend(vd, rs);
+}
 
 #endif // HAVE_CUDA

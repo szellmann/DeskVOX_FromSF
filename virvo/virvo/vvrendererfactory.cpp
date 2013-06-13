@@ -25,13 +25,10 @@
 #endif
 
 #include "vvdebugmsg.h"
+#include "vvdynlib.h"
 #include "vvvoldesc.h"
 #include "vvtexrend.h"
-#include "vvsoftrayrend.h"
 #include "vvsoftsw.h"
-#ifdef HAVE_CUDA
-#include "vvrayrend.h"
-#endif
 #include "vvibrclient.h"
 #include "vvimageclient.h"
 #ifdef HAVE_VOLPACK
@@ -42,12 +39,34 @@
 #include "vvsocketmap.h"
 #include "vvtcpsocket.h"
 
+#include "private/vvlog.h"
+
 #include <map>
 #include <string>
 #include <cstring>
 #include <algorithm>
 #include <vector>
 #include <sstream>
+
+#define EAX 0x0
+#define EBX 0x1
+#define ECX 0x2
+#define EDX 0x3
+
+#ifdef _MSC_VER
+
+#include <intrin.h>
+
+#else // g++/clang
+
+static void __cpuid(int reg[4], int type)
+{
+  __asm__ __volatile__ (
+    "cpuid": "=a" (reg[EAX]), "=b" (reg[EBX]), "=c" (reg[ECX]), "=d" (reg[EDX]) : "a" (type)
+  );
+}
+
+#endif
 
 namespace {
 
@@ -60,6 +79,7 @@ RendererAliasMap rendererAliasMap;
 RendererTypeMap rendererTypeMap;
 GeometryTypeMap geometryTypeMap;
 VoxelTypeMap voxelTypeMap;
+std::vector<std::string> rayRendArchs;
 
 void init()
 {
@@ -123,12 +143,119 @@ void init()
   rendererTypeMap["generic"] = vvRenderer::GENERIC;
   rendererTypeMap["soft"] = vvRenderer::SOFTSW;
   rendererTypeMap["rayrend"] = vvRenderer::RAYREND;
-  rendererTypeMap["softrayrend"] = vvRenderer::SOFTRAYREND;
   rendererTypeMap["volpack"] = vvRenderer::VOLPACK;
   rendererTypeMap["image"] = vvRenderer::REMOTE_IMAGE;
   rendererTypeMap["ibr"] = vvRenderer::REMOTE_IBR;
   rendererTypeMap["serbrick"] = vvRenderer::SERBRICKREND;
   rendererTypeMap["parbrick"] = vvRenderer::PARBRICKREND;
+
+  // ray rend architectures
+  rayRendArchs.push_back("cuda");
+  rayRendArchs.push_back("fpu");
+  rayRendArchs.push_back("sse");
+  rayRendArchs.push_back("sse4_1");
+}
+
+static bool test_bit(int value, int bit)
+{
+  return (value & (1 << bit)) != 0;
+}
+
+
+static bool archSupported(std::string const& arch)
+{
+  if (arch == "fpu")
+  {
+    return true;
+  }
+
+  if (arch == "cuda")
+  {
+#if VV_HAVE_CUDA
+    return true;
+#else
+    return false;
+#endif
+  }
+
+  int reg[4];
+  __cpuid(reg, 1);
+
+  if (arch == "mmx")
+    return test_bit(reg[EDX], 23);
+  if (arch == "sse")
+    return test_bit(reg[EDX], 25);
+  if (arch == "sse2")
+    return test_bit(reg[EDX], 26);
+  if (arch == "sse3")
+    return test_bit(reg[ECX], 0);
+  if (arch == "ssse3")
+    return test_bit(reg[ECX], 9);
+  if (arch == "sse4_1")
+    return test_bit(reg[ECX], 19);
+  if (arch == "sse4_2")
+    return test_bit(reg[ECX], 20);
+  if (arch == "avx")
+    return test_bit(reg[ECX], 28);
+
+  return false;
+}
+
+
+std::string findRayRendPlugin(std::string const& plugindir, std::string const& arch)
+{
+  std::stringstream namestr;
+  namestr << "librayrend";
+  if (arch == "best")
+  {
+    // TODO: determine *best available*
+    namestr << "sse4_1";
+  }
+  else
+  {
+    namestr << arch;
+  }
+  namestr << ".";
+#if defined(_WIN32) // TODO: resolve issues with cross compilation etc.
+  namestr << "dll";
+#elif defined __APPLE__
+  namestr << "dylib";
+#else
+  namestr << "so";
+#endif
+  std::string name = namestr.str();
+
+  VV_LOG(1) << "Locating plugin " << name << " in " << plugindir;
+
+  bool found = false;
+  std::vector<std::string> entrylist = virvo::toolshed::entryList(plugindir);
+  for (std::vector<std::string>::const_iterator it = entrylist.begin();
+       it != entrylist.end(); ++it)
+  {
+    if (*it == name)
+    {
+      found = true;
+      break;
+    }
+  }
+
+  if (found)
+  {
+    std::stringstream pathstr;
+    pathstr << plugindir;
+#ifdef _WIN32
+    pathstr << "\\";
+#else
+    pathstr << "/";
+#endif
+    pathstr << name;
+    std::string path = pathstr.str();
+    return path;
+  }
+  else
+  {
+    return std::string();
+  }
 }
 
 std::vector<std::string> split(const std::string &s, char delim)
@@ -147,6 +274,7 @@ struct ParsedOptions
   vvRendererFactory::Options options;
   std::string voxeltype;
   std::vector<vvTcpSocket*> sockets;
+  std::string arch; // fpu|sse|sse4_1|best (default)
   std::vector<std::string> filenames;
   size_t bricks;
   std::vector<std::string> displays;
@@ -154,6 +282,7 @@ struct ParsedOptions
 
   ParsedOptions()
     : voxeltype("default")
+    , arch("best")
     , bricks(1)
     , brickrenderer("planar")
   {
@@ -162,6 +291,7 @@ struct ParsedOptions
 
   ParsedOptions(std::string str)
     : voxeltype("default")
+    , arch("best")
     , bricks(1)
     , brickrenderer("planar")
   {
@@ -194,6 +324,7 @@ struct ParsedOptions
   ParsedOptions(const vvRendererFactory::Options &options)
     : options(options)
     , voxeltype("default")
+    , arch("best")
     , bricks(1)
     , brickrenderer("planar")
   {
@@ -217,7 +348,7 @@ struct ParsedOptions
       {
         voxeltype = val;
       }
-      else if(opt== "sockets")
+      else if(opt == "sockets")
       {
         sockets.clear();
         std::vector<std::string> sockstr = split(val, ',');
@@ -227,6 +358,10 @@ struct ParsedOptions
           vvTcpSocket* sock = static_cast<vvTcpSocket*>(vvSocketMap::get(atoi((*it).c_str())));
           sockets.push_back(sock);
         }
+      }
+      else if(opt == "arch")
+      {
+        arch = val;
       }
       else if(opt == "filename")
       {
@@ -277,6 +412,7 @@ vvRenderer *create(vvVolDesc *vd, const vvRenderState &rs, const char *t, const 
 
   vvTcpSocket* sock = NULL;
   std::string filename;
+  std::string arch = options.arch;
 
   if (options.sockets.size() > 0)
   {
@@ -334,12 +470,34 @@ vvRenderer *create(vvVolDesc *vd, const vvRenderState &rs, const char *t, const 
   case vvRenderer::VOLPACK:
     return new vvVolPack(vd, rs);
 #endif
-#ifdef HAVE_CUDA
   case vvRenderer::RAYREND:
-    return new vvRayRend(vd, rs);
-#endif
-  case vvRenderer::SOFTRAYREND:
-    return new vvSoftRayRend(vd, rs);
+  {
+    const char* pluginEnv = "VV_PLUGIN_PATH";
+    char* pluginPath = getenv(pluginEnv);
+    std::string ppath = pluginPath == NULL ? "." : pluginPath;
+
+    // if VV_PLUGIN_PATH not set, try "."
+    std::string path = findRayRendPlugin(ppath, arch);
+    if (!path.empty())
+    {
+      VV_SHLIB_HANDLE handle = vvDynLib::open(path.c_str(), 1 /* RTLD_LAZY */);
+      vvRenderer* (*create)(vvVolDesc*, vvRenderState const&);
+      *(void**)(&create) = vvDynLib::sym(handle, "createSoftRayRend");
+      if (create != NULL)
+      {
+        return (*create)(vd, rs);
+      }
+      else
+      {
+        VV_LOG(0) << vvDynLib::error();
+      }
+    }
+    else
+    {
+      VV_LOG(0) << "No ray casting plugin loaded for architecture " << arch << std::endl;
+    }
+  }
+  // fall through
   case vvRenderer::TEXREND:
   default:
     {
@@ -392,16 +550,14 @@ vvRenderer *vvRendererFactory::create(vvVolDesc *vd,
 
 bool vvRendererFactory::hasRenderer(const std::string& name)
 {
+  init();
+
   std::string str = name;
   std::transform(str.begin(), str.end(), str.begin(), ::tolower);
 
   if (str == "rayrend")
   {
     return hasRenderer(vvRenderer::RAYREND);
-  }
-  else if (str == "softrayrend")
-  {
-    return hasRenderer(vvRenderer::SOFTRAYREND);
   }
 #ifdef HAVE_OPENGL
   else if (str == "slices")
@@ -441,14 +597,27 @@ bool vvRendererFactory::hasRenderer(const std::string& name)
 
 bool vvRendererFactory::hasRenderer(vvRenderer::RendererType type)
 {
+  init();
+
   switch (type)
   {
   case vvRenderer::RAYREND:
-#ifdef HAVE_CUDA
-    return true;
-#else
+  {
+    const char* pluginEnv = "VV_PLUGIN_PATH";
+    char* pluginPath = getenv(pluginEnv);
+    std::string ppath = pluginPath == NULL ? "." : pluginPath;
+
+    for (std::vector<std::string>::const_iterator it = rayRendArchs.begin();
+         it != rayRendArchs.end(); ++it)
+    {
+      // at least one plugin for an arbitrary architecture available?
+      if (!findRayRendPlugin(ppath, *it).empty())
+      {
+        return true;
+      }
+    }
     return false;
-#endif
+  }
   case vvRenderer::TEXREND:
 #ifdef HAVE_OPENGL
     return true;
@@ -464,6 +633,21 @@ bool vvRendererFactory::hasRenderer(vvRenderer::RendererType type)
   default:
     return true;
   }
+}
+
+bool vvRendererFactory::hasRayRenderer(std::string const& arch)
+{
+  const char* pluginEnv = "VV_PLUGIN_PATH";
+  char* pluginPath = getenv(pluginEnv);
+  std::string ppath = pluginPath == NULL ? "." : pluginPath;
+
+  if (!archSupported(arch))
+  {
+    return false;
+  }
+
+  // if VV_PLUGIN_PATH not set, try "."
+  return !findRayRendPlugin(ppath, arch).empty(); // TODO: e. g. try to open a symbol for validation
 }
 
 //============================================================================

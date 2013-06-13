@@ -2101,11 +2101,10 @@ void vvView::createMenus()
   if (vvTexRend::isSupported(vvTexRend::VV_BRICKS))    glutAddMenuEntry("3D textures - bricked [5]", 5);
   glutAddMenuEntry("CPU Shear-warp [6]", 6);
   glutAddMenuEntry("GPU Shear-warp [7]", 7);
-  glutAddMenuEntry("GPU Ray casting [8]", 8);
+  glutAddMenuEntry("Ray casting [8]", 8);
   glutAddMenuEntry("VolPack [9]", 9);
   glutAddMenuEntry("Image-based remote rendering", 10);
   glutAddMenuEntry("Remote rendering", 11);
-  glutAddMenuEntry("CPU Ray casting", 12);
   glutAddMenuEntry("Decrease quality [-]", 98);
   glutAddMenuEntry("Increase quality [+]", 99);
 

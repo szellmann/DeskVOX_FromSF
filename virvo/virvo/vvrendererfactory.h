@@ -58,6 +58,7 @@ class VIRVOEXPORT vvRendererFactory
 
     static bool hasRenderer(const std::string& name);
     static bool hasRenderer(vvRenderer::RendererType type);
+    static bool hasRayRenderer(std::string const& arch);
 
 };
 #endif
